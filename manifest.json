@@ -1,8 +1,12 @@
 {
   "name": "Slice & Push",
-  "id": "1615065053831195476",
+  "id": "1615359802989551523",
+  "editorType": ["figma"],
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
-  "editorType": ["figma"]
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"]
+}
 }
