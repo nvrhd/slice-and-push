@@ -1,4 +1,4 @@
-figma.showUI(__html__, { width: 300, height: 520, themeColors: true });
+figma.showUI(__html__, { width: 420, height: 600, themeColors: true });
 
 var COPYABLE = [
   'characters','fontSize','fontName','fills','strokes','strokeWeight','strokeAlign',
@@ -8,6 +8,7 @@ var COPYABLE = [
 ];
 var internalSelect = false;
 var sliceBuffer = {};
+var sliceBufferScale = 2;
 
 function getPathFromRoot(node, root) {
   var path = [], current = node;
@@ -161,7 +162,7 @@ function handleSelectNode(msg) {
 
 // ── Slice ─────────────────────────────────────────────────────────────────────
 
-async function exportCrop(source, x, y, w, h) {
+async function exportCrop(source, x, y, w, h, scale) {
   var frame = figma.createFrame();
   frame.clipsContent = true;
   frame.fills = [];
@@ -173,7 +174,7 @@ async function exportCrop(source, x, y, w, h) {
   frame.appendChild(clone);
   clone.x = -x;
   clone.y = -y;
-  var bytes = await frame.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
+  var bytes = await frame.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale || 2 } });
   frame.remove();
   return bytes;
 }
@@ -188,6 +189,9 @@ async function handleSlice(msg) {
     var R = parseFloat(msg.right)  || 0;
     var T = parseFloat(msg.top)    || 0;
     var B = parseFloat(msg.bottom) || 0;
+    var scale = (msg.scale !== undefined && msg.scale !== null) ? Number(msg.scale) : 2;
+    console.log('slice scale:', scale);
+    sliceBufferScale = scale;
 
     var defs;
     if (msg.mode === '3h') {
@@ -213,9 +217,9 @@ async function handleSlice(msg) {
     for (var i = 0; i < defs.length; i++) {
       var d = defs[i];
       if (d.w <= 0 || d.h <= 0) continue;
-      figma.ui.postMessage({ type: 'slice-progress', text: 'Slicing ' + d.name + '…  (' + (i+1) + '/' + defs.length + ')' });
+      figma.ui.postMessage({ type: 'slice-progress', text: 'Slicing ' + d.name + '… (' + (i+1) + '/' + defs.length + ')' });
       try {
-        var bytes = await exportCrop(source, d.x, d.y, d.w, d.h);
+        var bytes = await exportCrop(source, d.x, d.y, d.w, d.h, scale);
         sliceBuffer[d.name] = figma.createImage(bytes).hash;
       } catch(e) {
         console.log('slice skip ' + d.name + ': ' + e.message);
@@ -228,9 +232,37 @@ async function handleSlice(msg) {
   }
 }
 
-// ── Push to selected ──────────────────────────────────────────────────────────
-// Ищет ЛЮБЫЕ вложенные ноды (авто-лейаут, инстансы, группы) по имени
-// и ставит IMAGE fill. Пропускает контейнеры если у них есть дочерние ноды.
+// ── Shared fill builder ───────────────────────────────────────────────────────
+
+function makeFill(hash, sliceName, mode, scale) {
+  var tileNames = mode === '3h'
+    ? ['center']
+    : ['left', 'right', 'top', 'bottom'];
+  if (tileNames.indexOf(sliceName) !== -1) {
+    return { type: 'IMAGE', scaleMode: 'TILE', imageHash: hash, scalingFactor: 1 / scale };
+  }
+  return { type: 'IMAGE', scaleMode: 'FILL', imageHash: hash };
+}
+
+function detectMode() {
+  var names = Object.keys(sliceBuffer);
+  return names.length <= 3 ? '3h' : '8';
+}
+
+var SHAPES = ['RECTANGLE','ELLIPSE','VECTOR','POLYGON','STAR','LINE','BOOLEAN_OPERATION'];
+
+function findTargets(node, names, acc) {
+  if (names.indexOf(node.name) !== -1) {
+    var isShape = SHAPES.indexOf(node.type) !== -1;
+    var isEmptyContainer = !node.children || node.children.length === 0;
+    if (isShape || isEmptyContainer) { acc.push(node); return; }
+  }
+  if (node.children) {
+    for (var i = 0; i < node.children.length; i++) findTargets(node.children[i], names, acc);
+  }
+}
+
+// ── Push to selected frame ────────────────────────────────────────────────────
 
 async function handlePushToSelected() {
   try {
@@ -238,53 +270,20 @@ async function handlePushToSelected() {
     if (!names.length) { figma.ui.postMessage({ type: 'push-result', error: 'No slices in buffer — click Slice first' }); return; }
     var selection = figma.currentPage.selection;
     if (!selection.length) { figma.ui.postMessage({ type: 'push-result', error: 'Select a target frame' }); return; }
-
-    // Какие имена тайлятся — зависит от количества слайсов в буфере
-    var tileNames = names.length <= 3
-      ? ['center']                          // 3-slice
-      : ['left', 'right', 'top', 'bottom']; // 8-slice
-
-    var SHAPES = ['RECTANGLE','ELLIPSE','VECTOR','POLYGON','STAR','LINE','BOOLEAN_OPERATION'];
-
-    function findTargets(node, acc) {
-      var nameMatch = names.indexOf(node.name) !== -1;
-      if (nameMatch) {
-        var isShape = SHAPES.indexOf(node.type) !== -1;
-        var isEmptyContainer = !node.children || node.children.length === 0;
-        if (isShape || isEmptyContainer) { acc.push(node); return; }
-      }
-      if (node.children) {
-        for (var i = 0; i < node.children.length; i++) findTargets(node.children[i], acc);
-      }
-    }
-
-    function makeFill(hash, name) {
-      if (tileNames.indexOf(name) !== -1) {
-        return { type: 'IMAGE', scaleMode: 'TILE', imageHash: hash, scalingFactor: 0.5 };
-      }
-      return { type: 'IMAGE', scaleMode: 'FILL', imageHash: hash };
-    }
-
+    var mode = detectMode();
     var updated = 0, errMsgs = [];
     for (var s = 0; s < selection.length; s++) {
       var targets = [];
-      findTargets(selection[s], targets);
+      findTargets(selection[s], names, targets);
       for (var j = 0; j < targets.length; j++) {
         var hash = sliceBuffer[targets[j].name];
         if (!hash) continue;
-        try {
-          targets[j].fills = [makeFill(hash, targets[j].name)];
-          updated++;
-        } catch(e) {
-          errMsgs.push(targets[j].name + ': ' + e.message);
-        }
+        try { targets[j].fills = [makeFill(hash, targets[j].name, mode, sliceBufferScale)]; updated++; }
+        catch(e) { errMsgs.push(targets[j].name + ': ' + e.message); }
       }
     }
-
     if (updated === 0) {
-      figma.ui.postMessage({ type: 'push-result', error: errMsgs.length
-        ? errMsgs.join(' | ')
-        : 'No matching leaf nodes found. Searched: ' + names.join(', ') });
+      figma.ui.postMessage({ type: 'push-result', error: errMsgs.length ? errMsgs.join(' | ') : 'No matching leaf nodes found. Searched: ' + names.join(', ') });
     } else {
       var txt = 'Applied to ' + updated + ' node' + (updated !== 1 ? 's' : '');
       if (errMsgs.length) txt += '  (' + errMsgs.length + ' skipped)';
@@ -295,7 +294,64 @@ async function handlePushToSelected() {
   }
 }
 
-// ── Selection change ──────────────────────────────────────────────────────────
+// ── Push to main component ────────────────────────────────────────────────────
+
+async function handlePushToMain() {
+  try {
+    var names = Object.keys(sliceBuffer);
+    if (!names.length) { figma.ui.postMessage({ type: 'push-result', error: 'No slices in buffer — click Slice first' }); return; }
+    var selection = figma.currentPage.selection;
+    if (!selection.length) { figma.ui.postMessage({ type: 'push-result', error: 'Select an instance or component' }); return; }
+    var mode = detectMode();
+
+    // Collect unique main components
+    var mainComponents = [];
+    function addMain(c) {
+      for (var k = 0; k < mainComponents.length; k++) if (mainComponents[k].id === c.id) return;
+      mainComponents.push(c);
+    }
+
+    for (var s = 0; s < selection.length; s++) {
+      var node = selection[s];
+      if (node.type === 'COMPONENT') { addMain(node); continue; }
+      var instances = collectInstances([node]);
+      for (var i = 0; i < instances.length; i++) {
+        var main = await instances[i].getMainComponentAsync();
+        if (main && !main.remote) addMain(main);
+      }
+    }
+
+    if (!mainComponents.length) {
+      figma.ui.postMessage({ type: 'push-result', error: 'No local main components found in selection' });
+      return;
+    }
+
+    var updated = 0, errMsgs = [];
+    for (var m = 0; m < mainComponents.length; m++) {
+      var targets = [];
+      findTargets(mainComponents[m], names, targets);
+      for (var j = 0; j < targets.length; j++) {
+        var hash = sliceBuffer[targets[j].name];
+        if (!hash) continue;
+        try { targets[j].fills = [makeFill(hash, targets[j].name, mode, sliceBufferScale)]; updated++; }
+        catch(e) { errMsgs.push(targets[j].name + ': ' + e.message); }
+      }
+    }
+
+    if (updated === 0) {
+      figma.ui.postMessage({ type: 'push-result', error: 'No matching nodes in main component. Searched: ' + names.join(', ') });
+    } else {
+      var txt = 'Applied to ' + updated + ' node' + (updated !== 1 ? 's' : '')
+        + ' in ' + mainComponents.length + ' main' + (mainComponents.length !== 1 ? 's' : '');
+      if (errMsgs.length) txt += '  (' + errMsgs.length + ' skipped)';
+      figma.ui.postMessage({ type: 'push-result', text: txt });
+    }
+  } catch(e) {
+    figma.ui.postMessage({ type: 'push-result', error: 'Error: ' + e.message });
+  }
+}
+
+// ── Selection ─────────────────────────────────────────────────────────────────
 
 async function handleSelectionChange() {
   if (internalSelect) { internalSelect = false; return; }
@@ -324,4 +380,5 @@ figma.ui.onmessage = function(msg) {
   if (msg.type === 'select-node')      handleSelectNode(msg);
   if (msg.type === 'slice')            handleSlice(msg);
   if (msg.type === 'push-to-selected') handlePushToSelected();
+  if (msg.type === 'push-to-main')     handlePushToMain();
 };
