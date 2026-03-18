@@ -1,7 +1,7 @@
 {
   "name": "Slice & Push",
   "id": "1615359802989551523",
-  "editorType": ["figma"],
+  "editorType": ["figma", "dev"],
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
