@@ -7,6 +7,6 @@
   "ui": "ui.html",
   "documentAccess": "dynamic-page",
   "networkAccess": {
-    "allowedDomains": ["none"]
+    "allowedDomains": []
 }
 }

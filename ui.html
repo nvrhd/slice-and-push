@@ -187,6 +187,7 @@ body {
 
 <script>
 var inputRegistry = {};
+var dpr = window.devicePixelRatio || 1;
 var currentSliceInfo = null;
 var currentMode = '8';   // 8-slice по умолчанию
 var currentScale = 2;
@@ -417,10 +418,10 @@ function showSlicePanel(info) {
   var canvas = document.getElementById('sliceCanvas');
   var maxW = 372, maxH = 200;
   var scale = Math.min(maxW / info.frameW, maxH / info.frameH);
-  canvas.width  = Math.round(info.frameW * scale);
-  canvas.height = Math.round(info.frameH * scale);
-  canvas.style.width  = canvas.width  + 'px';
-  canvas.style.height = canvas.height + 'px';
+  canvas.width  = Math.round(info.frameW * scale * dpr);
+  canvas.height = Math.round(info.frameH * scale * dpr);
+  canvas.style.width  = Math.round(info.frameW * scale) + 'px';
+  canvas.style.height = Math.round(info.frameH * scale) + 'px';
 
   var img = new Image();
   var blob = new Blob([new Uint8Array(info.imageData)], { type: 'image/png' });
@@ -430,16 +431,24 @@ function showSlicePanel(info) {
   initDrag(canvas);
 }
 
+var _dragHandlers = null;
 function initDrag(canvas) {
-  canvas.addEventListener('mousedown', function(e) {
+  if (_dragHandlers) {
+    canvas.removeEventListener('mousedown', _dragHandlers.mousedown);
+    canvas.removeEventListener('mousemove', _dragHandlers.mousemove);
+  }
+  var onMousedown = function(e) {
     var hit = hitTest(e, canvas);
     if (hit) { dragGuide = hit; e.preventDefault(); }
-  });
-  canvas.addEventListener('mousemove', function(e) {
+  };
+  var onMousemove = function(e) {
     if (dragGuide) return;
     var hit = hitTest(e, canvas);
     canvas.style.cursor = hit ? (hit==='left'||hit==='right' ? 'ew-resize' : 'ns-resize') : 'default';
-  });
+  };
+  _dragHandlers = { mousedown: onMousedown, mousemove: onMousemove };
+  canvas.addEventListener('mousedown', onMousedown);
+  canvas.addEventListener('mousemove', onMousemove);
 }
 
 document.addEventListener('mousemove', function(e) {
@@ -464,7 +473,7 @@ function hitTest(e, canvas) {
   var cx = (e.clientX - rect.left) / rect.width  * canvas.width;
   var cy = (e.clientY - rect.top)  / rect.height * canvas.height;
   var sx = canvas.width / info.frameW, sy = canvas.height / info.frameH;
-  var v = getVals(); var t = 8;
+  var v = getVals(); var t = 8 * dpr;
   if (Math.abs(cx - v.left  * sx) < t)                      return 'left';
   if (Math.abs(cx - (info.frameW - v.right) * sx) < t)      return 'right';
   if (currentMode === '8') {
@@ -518,7 +527,7 @@ setScale(2);
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
-window.onmessage = function(event) {
+window.addEventListener('message', function(event) {
   var msg = event.data.pluginMessage;
   if (!msg) return;
 
@@ -570,7 +579,7 @@ window.onmessage = function(event) {
       setSliceStatus('✓ ' + msg.text, 'var(--figma-color-text-success)');
     }
   }
-};
+});
 </script>
 </body>
 </html>

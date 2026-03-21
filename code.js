@@ -8,6 +8,7 @@ var COPYABLE = [
 ];
 var internalSelect = false;
 var sliceBuffer = {};
+var sliceBufferMode = '8';
 var sliceBufferScale = 2;
 
 function getPathFromRoot(node, root) {
@@ -39,9 +40,10 @@ function collectInstances(nodes) {
   }
   return result;
 }
-async function pushInstance(instance) {
+async function collectPushPlan(instance) {
   var main = await instance.getMainComponentAsync();
-  if (!main || main.remote) return false;
+  if (!main || main.remote) return null;
+  var changes = [];
   for (var i = 0; i < instance.overrides.length; i++) {
     var ov = instance.overrides[i];
     var instanceNode = instance.id === ov.id ? instance : instance.findOne(function(n) { return n.id === ov.id; });
@@ -53,11 +55,16 @@ async function pushInstance(instance) {
     for (var j = 0; j < ov.overriddenFields.length; j++) {
       var field = ov.overriddenFields[j];
       if (COPYABLE.indexOf(field) === -1) continue;
-      try { mainNode[field] = instanceNode[field]; } catch(e) {}
+      changes.push({ mainNode: mainNode, field: field, value: instanceNode[field] });
     }
   }
-  try { main.resize(instance.width, instance.height); } catch(e) {}
-  return true;
+  return { main: main, instance: instance, changes: changes };
+}
+function applyPushPlan(plan) {
+  for (var i = 0; i < plan.changes.length; i++) {
+    try { plan.changes[i].mainNode[plan.changes[i].field] = plan.changes[i].value; } catch(e) {}
+  }
+  try { plan.main.resize(plan.instance.width, plan.instance.height); } catch(e) {}
 }
 
 async function handlePush() {
@@ -65,10 +72,15 @@ async function handlePush() {
   if (!selection.length) { figma.ui.postMessage({ type: 'error', text: 'Nothing selected' }); return; }
   var instances = collectInstances(selection);
   if (!instances.length) { figma.ui.postMessage({ type: 'error', text: 'No instances in selection' }); return; }
-  var pushed = 0, skipped = 0;
+  // Phase 1: collect all data asynchronously
+  var plans = [], skipped = 0;
   for (var i = 0; i < instances.length; i++) {
-    if (await pushInstance(instances[i])) pushed++; else skipped++;
+    var plan = await collectPushPlan(instances[i]);
+    if (plan) plans.push(plan); else skipped++;
   }
+  // Phase 2: apply all changes synchronously — single undo step
+  for (var p = 0; p < plans.length; p++) applyPushPlan(plans[p]);
+  var pushed = plans.length;
   figma.ui.postMessage({ type: 'done', text: skipped > 0
     ? 'Pushed ' + pushed + ', skipped ' + skipped + ' (remote)'
     : 'Pushed to ' + pushed + ' component' + (pushed !== 1 ? 's' : '') });
@@ -152,8 +164,7 @@ async function handleSaveDimension(msg) {
       figma.ui.postMessage({ type: 'saved', text: msg.field + ' → ' + val });
     } catch(e) {}
   }
-  var root = figma.currentPage.selection[0];
-  if (root) { figma.ui.postMessage({ type: 'vars-updated', updates: await collectVarValues(root) }); }
+  if (node) { figma.ui.postMessage({ type: 'vars-updated', updates: await collectVarValues(node) }); }
 }
 function handleSelectNode(msg) {
   var node = figma.currentPage.findOne(function(n) { return n.id === msg.nodeId; });
@@ -170,13 +181,16 @@ async function exportCrop(source, x, y, w, h, scale) {
   frame.x = -99999;
   frame.y = -99999;
   figma.currentPage.appendChild(frame);
-  var clone = source.clone();
-  frame.appendChild(clone);
-  clone.x = -x;
-  clone.y = -y;
-  var bytes = await frame.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale || 2 } });
-  frame.remove();
-  return bytes;
+  try {
+    var clone = source.clone();
+    frame.appendChild(clone);
+    clone.x = -x;
+    clone.y = -y;
+    var bytes = await frame.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale || 2 } });
+    return bytes;
+  } finally {
+    frame.remove();
+  }
 }
 
 async function handleSlice(msg) {
@@ -190,8 +204,8 @@ async function handleSlice(msg) {
     var T = parseFloat(msg.top)    || 0;
     var B = parseFloat(msg.bottom) || 0;
     var scale = (msg.scale !== undefined && msg.scale !== null) ? Number(msg.scale) : 2;
-    console.log('slice scale:', scale);
     sliceBufferScale = scale;
+    sliceBufferMode = msg.mode;
 
     var defs;
     if (msg.mode === '3h') {
@@ -245,8 +259,7 @@ function makeFill(hash, sliceName, mode, scale) {
 }
 
 function detectMode() {
-  var names = Object.keys(sliceBuffer);
-  return names.length <= 3 ? '3h' : '8';
+  return sliceBufferMode;
 }
 
 var SHAPES = ['RECTANGLE','ELLIPSE','VECTOR','POLYGON','STAR','LINE','BOOLEAN_OPERATION'];
