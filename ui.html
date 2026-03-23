@@ -197,7 +197,7 @@ var sliceValues = { left: 16, right: 16, top: 16, bottom: 16 };
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
 function switchTab(name) {
-  var names = ['slice','vars','push'];
+  var names = ['slice','push','vars'];
   document.querySelectorAll('.tab').forEach(function(t, i) {
     t.classList.toggle('active', names[i] === name);
   });
